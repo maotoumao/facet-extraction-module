@@ -4,6 +4,7 @@ import os
 import zipfile
 from flask_cors import cross_origin
 from concurrent.futures import ThreadPoolExecutor
+from gevent import pywsgi
 
 import preprocess.getCentralWord as GetCentralWord
 import preprocess.getSummaryEmbedding as GetSummaryEmbedding
@@ -36,7 +37,7 @@ status = {}
 
 
 def getStatus(domain, topicList, outputBasePath):
-    if domain == None or not os.path.exists(os.path.join(outputBasePath, domain)):
+    if domain == None or topicList == None:
         return {
             'status': 'ILLEGAL_CLASSNAME'
         }
@@ -70,15 +71,15 @@ def preprocess(domain, topicList):
     GetTopicHieraries.run(domain, topicList, config['rawDataPath'], config['outputBasePath'])
 
 def toFM(domain, topicList):
-    status[domain]['step'] = 'CALCULATE_SIMILARITIES'
+    status[domain]['step'] = 'ALG_CALCULATE_SIMILARITIES'
     GenerateP.run(domain, topicList, config['outputBasePath'])
-    status[domain]['step'] = 'TOPIC_CLUSTERING'
+    status[domain]['step'] = 'ALG_TOPIC_CLUSTERING'
     TopicCluster.run(domain, topicList, config['outputBasePath'])
-    status[domain]['step'] = 'GENERATE_PROPAGATION_MATRIX'
+    status[domain]['step'] = 'ALG_GENERATE_PROPAGATION_MATRIX'
     GenerateF.run(domain, topicList, config['outputBasePath'])
-    status[domain]['step'] = 'LABEL_PROPAGATION'
+    status[domain]['step'] = 'ALG_LABEL_PROPAGATION'
     LP.run(domain, config['outputBasePath'])
-    status[domain]['step'] = 'ANALYSE_FACET_SET'
+    status[domain]['step'] = 'ALG_ANALYSE_FACET_SET'
     Analyse.run(domain, config['outputBasePath'])
     status.pop(domain)
 
@@ -130,10 +131,43 @@ def downloadFacets():
             for topic in topicList:
                 _zipFile.write(os.path.join(config['outputBasePath'], domain, topic, 'facetSet.txt'), arcname=topic+'.txt')
             _zipFile.close()
-            return send_file(os.path.join(config['outputBasePath'], domain, '__tmpData', domain + '_facetSets.zip'))
+            return send_file(os.path.join(config['outputBasePath'], domain, '__tmpData', domain + '_facetSets.zip'), as_attachment=True)
         return jsonify({
             'status': 'NOT_CONSTRUCTED'
-        })
+        }), 404
+
+@app.route('/get-init-facets', methods=['POST'])
+@cross_origin()
+def getInitFacets():
+    if request.method == 'POST':
+        domain = request.get_json().get('className')
+        topicList = request.get_json().get('topicNames')
+        stat = getStatus(domain, topicList, config['outputBasePath'])
+        if stat['status'] == 'EXIST' or (stat['status'] == 'CONSTRUCTING' and stat['meta']['step'].startswith('ALG_')):
+            result = {}
+            for topic in topicList:
+                with open(os.path.join(config['outputBasePath'], domain, topic, 'centralWord.txt'), 'r', encoding='utf-8') as f:
+                    result[topic] = [fa.strip() for fa in f.readlines()]
+            return jsonify(result)
+        return jsonify({'status': 'NOT_FOUND'}), 404
+
+
+@app.route('/get-facet-set', methods=['POST'])
+@cross_origin()
+def getFacetSet():
+    if request.method == 'POST':
+        domain = request.get_json().get('className')
+        topicList = request.get_json().get('topicNames')
+        if getStatus(domain, topicList, config['outputBasePath'])['status'] == 'EXIST':
+            result = {}
+            for topic in topicList:
+                with open(os.path.join(config['outputBasePath'], domain, topic, 'facetSet.txt'), 'r', encoding='utf-8') as f:
+                    result[topic] = [fa.strip() for fa in f.readlines()]
+                    result[topic].sort()
+            return jsonify(result)
+        return jsonify({'status': 'NOT_FOUND'}), 404
 
 if __name__ == '__main__':
+    # server = pywsgi.WSGIServer(('0.0.0.0', 4675), app)
+    # server.serve_forever()
     app.run(host='0.0.0.0', port='4675')
